@@ -1,0 +1,145 @@
+#!/usr/bin/perl
+#
+# mhdraft=/Users/kono/Mail/drafts/556
+# system("printenv");
+# print("$0\n");
+
+# system("mhn", @ARGV);
+
+my $type = "text/plain; charset=\"UTF-8\"";
+my $encoding = "8bit";
+my @header;
+my $out = $ENV{'mhdraft'}.".tmp";
+my $sign = $ENV{'mhdraft'}.".p7s";
+my $to;
+my $boundary = "GPGSM-Mail=_AFEF8599-F7C6-4412-ACEF-539755C585C2";
+
+&openMail;
+if ($0 =~ /sign/) {
+    &sign;
+} elsif ($0 =~ /enc/) {
+    &sign;
+    &encode;
+} else {
+    print "error $0\n";
+}
+
+# read header Part
+sub headerPart {
+    # empty line means the end of header in a mail part
+    while(<M>) {
+        last if (/^$/);
+        last if (/^--*$/);
+        $type = $1 if (/^Content-Type: (.*)/) ;
+        $encoding = $1 if (/^Content-Transfer-Encoding: (.*)/);
+        $boundary = $1 if (/^\s*boundary=\"(.*)\"$/) ;
+        $to = $1 if (/^To:.*\<(.*)\>/) ;
+        $to = $1 if (/^To:\s*([^\s<>]+\@[^\s<>]+)/) ;
+        if (/^ /) {
+            $header[$#header-1] .= $_;
+        } else {
+            push @header ,$_;
+        }
+    }
+}
+
+sub openMail {
+    open O,">",$out or die "can't open $!\n";
+    open M,"<",$ENV{'mhdraft'} or die "can't open $!\n";
+    &headerPart;
+    print O <<"EOFEOF";
+Content-Type: $type\r
+Content-Transfer-Encoding: $encoding\r
+\r
+Content-Type: text/plain\r
+\r
+EOFEOF
+    while(<M>) {
+        chop;
+        print O $_,"\r\n" ;
+    }
+    close O;
+}
+
+sub sign {
+    open O,">",$ENV{'mhdraft'} or die "can't open $!\n";
+    open M,"<",$out or die "can't open $!\n";
+    select O;
+    for ( @header ) {
+        next if (/^Content-Type/);
+        next if (/^Content-Transfer/);
+        print ;
+    }
+    # if we have multipart, use its boundary
+    # outpout content
+    print <<"EOFEOF";
+Content-Type: multipart/signed;
+   boundary="GPGSM-Mail=_41070376-76F6-4E6D-BE3A-1DD07BDA7DA8";
+   protocol="application/pkcs7-signature";
+   micalg=sha-256
+
+This is an S/MIME signed message
+
+--GPGSM-Mail=_41070376-76F6-4E6D-BE3A-1DD07BDA7DA8
+EOFEOF
+    
+    open M,"<",$out or die "can't open $!\n";
+    print while(<M>);
+
+    # outpout sign
+    print <<"EOFEOF";
+
+--GPGSM-Mail=_41070376-76F6-4E6D-BE3A-1DD07BDA7DA8
+Content-Disposition: attachment;
+        filename=smime.p7s
+Content-Type: application/pkcs7-signature;
+        name=smime.p7s
+Content-Transfer-Encoding: base64
+
+EOFEOF
+    system "gpgsm --sign --include-certs -1 -b -a  -o $sign $out";
+    open S ,"<", $sign or die($!);
+    while(<S>) {
+       next if (/^-----(BEGIN|END) .* MESSAGE-----$/);
+       print ;
+    }
+    print <<"EOFEOF";
+
+--GPGSM-Mail=_41070376-76F6-4E6D-BE3A-1DD07BDA7DA8--
+EOFEOF
+    close O;
+}
+
+sub encode {
+    open O,">",$out or die "can't open $!\n";
+    open M,"<", $ENV{'mhdraft'} or die "can't open $!\n";
+    my $ign = 1;
+    while(<M>) {
+        $ign = 0 if (/^--GPGSM-Mail=_41070376-76F6-4E6D-BE3A-1DD07BDA7DA8/);
+        print if (! $ign);
+    }
+    close O;
+    open O,">",$ENV{'mhdraft'} or die "can't open $!\n";
+    select O;
+    for ( @header ) {
+        next if (/^Content-Type/);
+        next if (/^MIME.*/);
+        next if (/^Content-Transfer/);
+        print ;
+    }
+    print <<"EOFEOF";
+MIME-Version: 1.0
+Content-Disposition: attachment; filename="smime.p7m"
+Content-Type: application/x-pkcs7-mime; smime-type=enveloped-data; name="smime.p7m"
+Content-Transfer-Encoding: base64
+EOFEOF
+    print "\n";
+    open S ,"gpgsm --recipient '$to' -a -e $out |" or die($!);
+    while(<S>) {
+       next if (/^-----(BEGIN|END) .* MESSAGE-----$/);
+       print ;
+    }
+}
+
+
+1;

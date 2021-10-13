@@ -1,0 +1,505 @@
+#!/usr/bin/perl -w
+
+# $Id$
+
+# MH で、multi part message を読むための script
+# mhl の替わりに使います。
+# ushow: -showproc /Users/kono/bin/mhlnkf -form mhl.news
+# などとします。mhl が最終的に呼ばれます。
+#     mhlnkf `mhpath cur` 
+# と言う風に使っても問題ありません。
+
+use strict;
+
+use NKF;
+use MIME::Base64;
+use MIME::QuotedPrint;
+
+
+
+
+my ($max) = 200000;                       # メールの最大長
+my $unlink = 0;                           # 中間ファイルを消すかどうか
+my $show_header = 1;                      # header を表示するかどうか
+my $mhl = "/usr/local/mh/lib/mhl";        #   mhl program
+my @mhl_option = ("-form","mhl.news");    # default form
+my $nkfopt = "--unix -Zw";                # nkf のoption, unix new line, convert zenkaku alphabet, utf-8
+#  temp file を使っても良いのだが、固定名で /tmp に作る方が結果的には便利。
+#  debug にも。
+# use File::Temp qw/ tempfile tempdir /;
+my $tmpname = "/tmp/show1111";      
+
+my (@A) = ();                             # mh からの引数
+my (@U) = ();                             # mh からのファイル名
+my @boundary  = ();                       # multi-part boundary
+my $itemcount = 1;                        # multi-part number
+my $filename;                             # file name
+my $verify = 1;                           # gpgs verify and register key
+my $signature = "";
+
+# decode argument from mh
+
+while ( @ARGV ) {
+    $_ = shift(@ARGV);
+    # options require argument
+    if( /^-form/ ) {
+       push(@A,$_); $_ = shift(@ARGV); push(@A,$_);
+       if ( -f $_) {
+           open S,"<",$_ or next;
+           while(<S>) {
+               $signature .= "$1\n" if (/^:(.*)/) ;
+           }
+       }
+    } elsif( /^-/ ) {
+       push(@A,$_); 
+    } else {
+       push(@U,$_); 
+    } 
+}
+
+if ($#U == -1 && $signature) {
+    open O,">","$tmpname.repl" or die($!);
+    while(<>) {
+        print O $_;
+    }
+    close O;
+    push @U,"$tmpname.repl";
+}
+# process each file 
+
+for (@U) {
+    $filename = $_;
+    $itemcount = 0;
+    s/[<>`'"]//g;
+    open(IN,"<$_");
+    &mailDecode;
+    &last;               # flush internal buffer
+    print $signature if ($signature) ;
+}
+
+my $fullbuffer = "";     # internal buffer
+
+# add to internal buffer
+sub mynkf
+{
+    $fullbuffer .= $_[0];
+}
+
+# flush internal buffer
+sub last
+{
+#    my ($fh, $filename) = tempfile();
+    my ($fh, $filename) = ("out",$tmpname.".txt");
+    open OUT,">$filename";
+    print OUT nkf($nkfopt,$fullbuffer);
+    close OUT;
+#    if (!fork) {
+    system ($mhl, @mhl_option, $filename);
+#    }
+#    wait;   # some how it does not wait
+    my $result = $?;                     # check for user interrupt 
+    unlink($filename) if ($unlink);
+    exit ($result) if ($result != 1 && $result != 0);   # otherwise we cannot escape from here
+    $fullbuffer = "";                    # clear internal buffer
+}
+
+# hanlde each parts
+sub parts {
+    my ($p) = @_;
+    my ($type, $encoding, $charset, $buf, $mimefilename) = 
+	($p->{type},$p->{encoding},$p->{charset},$p->{body},$p->{filename});
+
+    # decode base64 or quoted-printable
+    my $q = 0;
+    if ($encoding =~ /base64/ && $type !~ /pkcs7-mime/) {
+         # we have to avoid decode base64 in p7m 
+	 $buf = decode_base64($buf);
+    } elsif ($encoding =~ /quoted-printable/) {
+	 $buf = decode_qp($buf);
+	$q = 1;   # q encode have to preserve new line in show_html
+    }
+    # show parts information for user
+    my $title =  "Ushow" . $itemcount++ . ": $filename ". $type;
+    $title .= ($encoding)?" Encoding==".$encoding:"";
+    $title .= ($charset)?" Charset=".$charset:"";
+    $title .= ($mimefilename)?" Name=".$mimefilename."\n":"\n";
+    mynkf( $title ) if (! $signature);
+
+    # pass this part to handlers.
+    if ($type=~/html/) {
+	show_html($buf, $q);
+	return;
+    } elsif ($type=~/pdf/) {
+	show_pdf($buf);
+	return;
+    } elsif ($type=~/openxmlformats-officedocument/) {
+	show_docx($buf);
+	return;
+    } elsif ($type=~/ms-word/) {
+	show_doc($buf);
+	return;
+    } elsif ($type=~/msword/) {
+	show_doc($buf);
+	return;
+    } elsif ($type=~/header/) {
+	show_header($buf);
+	return;
+    } elsif ($type=~/rtf/) {
+	show_rtf($buf);
+	return;
+    } elsif ($type=~/rfc822/) {
+	show_mail($buf);
+    } elsif ($type=~/octet-stream/) {
+	# octect stream means we have to check filename suffix
+	if ($mimefilename) {
+	    if ($mimefilename=~/\.docx/) {
+		show_docx($buf);
+	    } elsif ($mimefilename=~/\.xlsx/) {
+		show_docx($buf);
+	    } elsif ($mimefilename=~/\.doc/) {
+		show_doc($buf);
+	    } elsif ($mimefilename=~/\.pdf/) {
+		show_pdf($buf);
+	    } elsif ($mimefilename=~/\.html/) {
+		show_html($buf);
+	    } elsif ($mimefilename=~/\.htm/) {
+		show_html($buf);
+	    } elsif ($mimefilename=~/\.txt/) {
+                mynkf($buf . "\n\n");
+	    }
+        }
+    } elsif ($type=~/application\/.*pkcs7-signature/) {
+        save_pksc7($buf,$p->{signed});
+    } elsif ($type=~/application\/.*pkcs7-mime/) {
+        save_pksc7_mime($buf);
+    } elsif ($type=~/application/) {
+    } elsif ($type=~/multipart/) {
+	# it only contains "This is a multi..."
+	# do nothing
+        # print "$type !!! $buf \n";
+    } elsif ($type=~/text/) {
+	mynkf($buf . "\n\n");
+    } elsif ($type=~/txt/) {
+	mynkf($buf . "\n\n");
+    } elsif ($type=~/^$/) {
+	mynkf($buf . "\n\n");
+    } else {
+        print "unknown $type\n";
+    }
+}
+
+# make canoncial part
+sub push_parts {
+# print "pushed!\n";
+    my ($buf, $type, $encoding, $charset, $mimefilename, $body,$signed) = @_;
+    my $parts;
+    return if ( $body !~ /[^\n\r\s]/);
+# print "pushed $type $encoding $charset body=$tmp\n";
+
+    $type =~ y/A-Z/a-z/ if ($type);
+    $encoding =~ y/A-Z/a-z/ if ($encoding);
+    $charset =~ y/A-Z/a-z/ if ($charset);
+
+    $parts->{type} = $type;
+    $parts->{encoding} = $encoding;
+    $parts->{charset} = $charset;
+    $parts->{body} = $body;
+    $parts->{filename} = $mimefilename;
+    $parts->{signed} = $signed if ($type =~ /pkcs7-signature/) ;
+    push(@$buf, $parts);
+}
+
+# read header Part
+sub headerPart {
+    # empty line means the end of header in a mail part
+    $/ = "\n\n";
+    my $headerstr = $_.<IN>;        # read until \n\n
+    my $orig = $headerstr;
+    return "" if (! $headerstr );
+    $/ = "\n";
+    $headerstr =~ s/\n\s+/ /g;      # remove continuation line
+    return nkf("-wm", $headerstr),$orig;  # decode mime subject
+}
+
+# parts separator
+sub mailDecode {
+    my ($i, $body, $header, $mime_header);
+    my $buf = [];
+    my ($type, $encoding, $charset, $mimefilename);
+    my ($main_type, $main_encoding,$main_charset) = ("text","7bit","");
+    my $sig = 0; my $sig_bound  = "xxxyyyyzzzyyzzz"; my $signed;
+    # assing "" to avoid undefine warnings
+    $body = $type =  $encoding =  $charset= $mimefilename = "";
+    push(@boundary , "xxxyyyyzzzyyzzz");    # push non-matchable boundary to avoid accidental match
+    $mime_header = 1;  # must starting from a header
+    while(<IN>) {
+	if ($mime_header) {
+            #  $sig = 0; $sig_bound = '';  # how's mutiple sig case?
+	    my ($header_part,$horig) = &headerPart;
+            $signed .= $horig if ($sig == 2);
+	    foreach ( split(/\n/,$header_part) ) {
+                # check important header. a line may contain several definitions
+		if(/^Content-Type:\s*([^;]+);?/io) {
+		    # push_parts($buf, $type, $encoding, $charset, $body); $body = "";
+		    $type = $1;
+                    # print "$type *****\n";
+                }
+		if (/protocol=.*pkcs7-signature/) {
+                        $sig = 1;
+                }
+		if (/\s+boundary\s*=\s*"?([^"\s]+)"?/io) {
+		    my $tmp = $1;
+		    $tmp =~  s/\W/\\$&/g;
+		    # chop($tmp);
+		    push(@boundary , $tmp);
+                    # print "boundary = $tmp ($_)\n";
+		} 
+                if (/\s+charset\s*=\s*"?([-_a-zA-z0-9]+)"?/io) {
+		    $charset = $1;
+		} 
+                if (/\s+name\s*=\s*"?([^"]+)"?/io) {
+		    $mimefilename = $1;
+		} 
+                if (/\s+filename\s*=\s*"?([^"]+)"?/io) {
+		    $mimefilename = $1;
+		} 
+                if (/^Content-Transfer-Encoding:\s*"?([^"]+)"?/io) {
+		    $encoding = $1;
+		}
+	    }
+            if ($sig) {
+                $sig_bound = $boundary[$#boundary];
+            }
+	    $mime_header = 0;
+	    $mime_header = 1 if ($type =~ /Rfc822/io) ;
+	    if (! $header) {
+	        # this is a main header of the mail
+                # handled by mhl
+		$header = 'header';
+                $main_type = $type;
+                $main_encoding = $encoding;
+                $main_charset = $charset;
+		push_parts($buf, "header", "text", "7bit", '', $header_part) if ($show_header) ;
+			# nkf("-mu",$body));
+	    }
+	    $i = 0;
+	    $body = "";
+	    next;
+	}
+	last if ($i++ > $max) ;
+	if (/^---*/) {
+            if (/$sig_bound/) {
+                $sig++ ;
+            } else {
+                $signed .= $_ if ($sig == 2);
+            }
+            # check for parts seperator 
+	    for my $b ( @boundary ) {     # nested separators
+		if (/$b/) {
+		    if (/--$/) { # ignore terminator
+			last if ($b !~ /\\-\\-$/) ;       # normal case
+			s/\-\-$b//; last if (/--$/);      # boundary contains --$
+		    }
+                    # flush previous parts
+		    push_parts($buf, $type, $encoding, $charset, $mimefilename, $body,$signed);
+                    # start new part from parts header
+		    $body = $type =  $encoding =  $charset= $mimefilename = "";
+		    $mime_header = 1;
+		    $i = 0;
+		}
+	    }
+	    next;
+        }
+        # yes, this is a content line
+	$body .= $_ ;
+        $signed .= $_ if ($sig == 2);
+    }
+    # flush last part
+    if ($main_type =~ /multi/) {
+        $main_type = $type;
+    }
+    push_parts($buf, $main_type, $main_encoding, $main_charset, $mimefilename, $body,$signed);
+    # show all parts
+    foreach my $p (@$buf) {
+	parts($p);
+    }
+    if ($main_type =~ /pkcs7-mime/) {
+        open(IN,"gpgsm -d ".$tmpname.".p7m| sed 's/.\$//'|");
+        &mailDecode;
+        return;
+    }
+}
+
+# html decoder
+
+# Should we left link in <a>?
+# How to handle <br />
+# Remove <style>
+sub show_html {
+    my $q; 
+    ($_,$q) = @_;
+    $_ = nkf($nkfopt." --numchar-input",$_);
+    if ($q) {
+        # quoted printable must preserve new lines
+        #    except new lines in tags
+	1 while (s/(<[^>]*)[\r\n]+([^>]*>)/$1$2/ig );
+    } else {
+        # preserve new line in pre
+	1 while (s/(<pre>.*?)\n(.*?<\/pre>)/$1\001$2/igs );
+	1 while (s/(<pre [^>]*>.*?)\n(.*?<\/pre>)/$1\001$2/igs );
+	s/[\r\n]//ig;    # remove all other
+	s/\001/\n/ig;    # recover new lines in pre
+    }
+#open AHO,">/tmp/show1111.html";
+#print AHO $_;
+
+    # easy html decoder
+    s/<style[^>]*>.*?<\/style>//igs ;
+    s/<a [^>]*href\s*=\s*\"(http:[^"]*)\"[^.]*>(.*?)<\/a>/$2 =  $1 /igs ;
+    s/<li>/\n * /ig;
+    s/<br>/\n/ig;
+    s/<br [^>]*>/\n/ig;
+    s/<p>/\n/ig;
+    s/<p [^>]*>/\n/ig;
+    s/<div>/\n/ig;
+    s/<div [^>]*>/\n/ig;
+    s/<sapn>/\n/ig;
+    s/<sapn [^>]*>/\n/ig;
+    s/<[^>]*>//ig;
+    s/<LI>/*/ig;
+    s/<LI [^>]*>/*/ig;
+    s/<[^>][^>]*>//g;    # remove all other tag
+    s/\&lt;/</g;
+    s/\&gt;/>/g ;
+    s/\&nbsp;/ /g ;
+    s/\&amp;/\001/g ;
+    s/\&[a-z]*;//g ;
+    s/\001/\&/g ;        # what's this?
+    # better to remove java script here
+    $fullbuffer .= $_."\n";
+}
+
+# pdf decoder
+sub show_pdf {
+    my ($buf) = @_;
+    my ($fh, $filename) = ("out",$tmpname.".pdf");
+    open OUT,">$filename";
+    print OUT $buf;
+    close OUT;
+    open PDF,"pdftotext $tmpname.pdf - |";
+    while(<PDF>) {
+        s/\014//g;
+	$fullbuffer .= $_;
+    }
+    $fullbuffer .= "\n";
+}
+
+sub save_pksc7 { # for gpgsm
+    my ($buf,$signed) = @_;
+    my ($fh, $filename) = ("out",$tmpname.".p7s");
+    open OUT,">$filename";
+    print OUT "-----BEGIN SIGNED MESSAGE-----\n";
+    print OUT $buf;
+    print OUT "-----END SIGNED MESSAGE-----\n";
+    close OUT;
+    open OUT,">$tmpname.body";
+    for (split(/\n/,$signed)) {
+        print OUT $_,"\r\n";
+    }
+    print OUT "\r\n";
+    close OUT;
+    if ($verify) {
+        system("gpgsm --verify $tmpname.p7s $tmpname.body");
+    }
+}
+
+sub save_pksc7_mime { # for gpgsm
+    my ($buf) = @_;
+    my ($fh, $filename) = ("out",$tmpname.".p7m");
+    open OUT,">$filename";
+    print OUT "-----BEGIN ENCRYPTED MESSAGE-----\n";
+    print OUT $buf;
+    print OUT "-----END ENCRYPTED MESSAGE-----\n";
+    close OUT;
+}
+
+# MS Word new format (xlsx also comes here, but we will ignore it)
+sub show_docx {
+    my ($buf) = @_;
+    my ($fh, $filename) = ("out",$tmpname.".zip");
+    open OUT,">$filename";
+    print OUT $buf;
+    close OUT;
+    open DOC,"unzip -p $filename word/document.xml|";
+    my $xml;
+    while(<DOC>) {
+        s/\014//g;
+        s/<w:r>/<br>/g;
+	$xml .= $_;
+    }
+    $xml .= "\n";
+    show_html($xml,0);
+}
+
+# MS Word old format
+sub show_doc {
+    my ($buf) = @_;
+    my ($fh, $filename) = ("out",$tmpname.".doc");
+    open OUT,">$filename" ;
+    print OUT $buf;
+    close OUT;
+    open DOC,"antiword $filename |";
+    my $flag = "";
+    while(<DOC>) {
+        $flag = $_;
+        $fullbuffer .= $_;
+    }
+    if (! $flag) {
+        $buf =~ s/\\\'([a-f0-9][a-f0-9])/pack("H*",$1)/eg;
+        $buf =~ s/\\[-a-z0-9]+//g;
+        $buf =~ s/[{}]//g;
+        $buf =~ s/\\[\\*]//g;
+        $fullbuffer .= $buf;
+    }
+}
+
+# RTF format
+sub show_rtf {
+    my ($buf) = @_;
+    my ($fh, $filename) = ("out",$tmpname.".rtf");
+    $buf =~ s/\\\'([a-f0-9][a-f0-9])/pack("H*",$1)/eg;
+    $buf =~ s/\\$//;
+    $fullbuffer .= $buf;
+}
+
+# nesed header ( is not handled by mhl )
+sub show_header  {
+    my ($buf) = @_;
+    $buf =~ s/\n\s+/ /g;
+    for ( split("\n", $buf)) {
+	if (/^Subject:/io) {
+	    $fullbuffer .= $_."\n";
+	} elsif (/^From:/io) {
+	    $fullbuffer .= $_."\n";
+	} elsif (/^Date:/io) {
+	    $fullbuffer .= $_."\n";
+	}
+    }
+    $fullbuffer .= "\n\n";
+    return;
+}
+
+# multi parted smtp mail
+sub show_mail {
+    my ($buf) = @_;
+    my ($fh, $filename) = ("out",$tmpname.".eml");
+    open OUT,">$filename";
+    print OUT $buf;
+    close OUT;
+    open DOC,"mhlnkf $filename |";   # call myself
+    while(<DOC>) {
+	$fullbuffer .= $_;
+    }
+}
+
+# end
