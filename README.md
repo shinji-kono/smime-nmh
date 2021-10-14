@@ -2,9 +2,10 @@
 Perl script handling gpgsm base smime in nmh
 
 ## install
-
+```
     install gnupg
     install NKF.pm
+```
 
 sign shoul be linked to encode, put sign and encode into your bin.
 
@@ -12,14 +13,18 @@ sign shoul be linked to encode, put sign and encode into your bin.
 
 In comp or repl,
 
+```
    what now : edit mhn
    what now : edit sign
    what now : edit encode
+```
 
 ## smime / key
 
 You can get key as
+```
    http://kb.mozillazine.org/Getting_an_SMIME_certificate
+```
 
 or create it by gpgsm 
 for
@@ -46,8 +51,10 @@ and trust it.
 This is an easy example.
 
 Basically, sign create two parts mime, which contains
+```
    verifiable nested mime part with crlf
    signed.p7s
+```
 these can be verified by gpgsm --verify
 
 Encode these verifiable two parts mime into single encrypted.p7m.
