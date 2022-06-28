@@ -9,20 +9,22 @@
 #     mhlnkf `mhpath cur` 
 # と言う風に使っても問題ありません。
 
+# GPG_TTY=$(tty)
+# export GPG_TTY=$TTY
+
 use strict;
 
 use NKF;
 use MIME::Base64;
 use MIME::QuotedPrint;
 
-
-
-
 my ($max) = 200000;                       # メールの最大長
 my $unlink = 0;                           # 中間ファイルを消すかどうか
 my $show_header = 1;                      # header を表示するかどうか
-my $mhl = "/usr/local/mh/lib/mhl";        #   mhl program
-my @mhl_option = ("-form","mhl.news");    # default form
+# my $mhl = "mhl";        #   mhl program
+# my @mhl_option = ("-form","mhl.news");    # default form
+my $mhl = "mhl";        #   mhl program
+my @mhl_option = ();    # default form
 my $nkfopt = "--unix -Zw";                # nkf のoption, unix new line, convert zenkaku alphabet, utf-8
 #  temp file を使っても良いのだが、固定名で /tmp に作る方が結果的には便利。
 #  debug にも。
@@ -34,6 +36,7 @@ my (@U) = ();                             # mh からのファイル名
 my @boundary  = ();                       # multi-part boundary
 my $itemcount = 1;                        # multi-part number
 my $filename;                             # file name
+my $mhfilename;                             # file name
 my $verify = 1;                           # gpgs verify and register key
 my $signature = "";
 
@@ -69,6 +72,7 @@ if ($#U == -1 && $signature) {
 
 for (@U) {
     $filename = $_;
+    $mhfilename = $_;
     $itemcount = 0;
     s/[<>`'"]//g;
     open(IN,"<$_");
@@ -190,11 +194,10 @@ sub parts {
 
 # make canoncial part
 sub push_parts {
-# print "pushed!\n";
     my ($buf, $type, $encoding, $charset, $mimefilename, $body,$signed) = @_;
     my $parts;
     return if ( $body !~ /[^\n\r\s]/);
-# print "pushed $type $encoding $charset body=$tmp\n";
+# print "pushed $type $encoding $charset body=\n";
 
     $type =~ y/A-Z/a-z/ if ($type);
     $encoding =~ y/A-Z/a-z/ if ($encoding);
@@ -239,12 +242,12 @@ sub mailDecode {
             $signed .= $horig if ($sig == 2);
 	    foreach ( split(/\n/,$header_part) ) {
                 # check important header. a line may contain several definitions
-		if(/^Content-Type:\s*([^;]+);?/io) {
+		if(/^Content-Type:\s*([^\s;]+);?/io) {
 		    # push_parts($buf, $type, $encoding, $charset, $body); $body = "";
 		    $type = $1;
                     # print "$type *****\n";
                 }
-		if (/protocol=.*pkcs7-signature/) {
+		if (/protocol=.*pkcs7-signature/io) {
                         $sig = 1;
                 }
 		if (/\s+boundary\s*=\s*"?([^"\s]+)"?/io) {
@@ -253,6 +256,10 @@ sub mailDecode {
 		    # chop($tmp);
 		    push(@boundary , $tmp);
                     # print "boundary = $tmp ($_)\n";
+                    if ($type eq "multipart/signed" ) {
+                        # print "singed boundary = $tmp\n";
+                        $sig_bound = $tmp;
+                    }
 		} 
                 if (/\s+charset\s*=\s*"?([-_a-zA-z0-9]+)"?/io) {
 		    $charset = $1;
@@ -267,9 +274,6 @@ sub mailDecode {
 		    $encoding = $1;
 		}
 	    }
-            if ($sig) {
-                $sig_bound = $boundary[$#boundary];
-            }
 	    $mime_header = 0;
 	    $mime_header = 1 if ($type =~ /Rfc822/io) ;
 	    if (! $header) {
@@ -289,7 +293,7 @@ sub mailDecode {
 	last if ($i++ > $max) ;
 	if (/^---*/) {
             if (/$sig_bound/) {
-                $sig++ ;
+                $sig++ ; # print "$_ ==== $sig_bound\n";
             } else {
                 $signed .= $_ if ($sig == 2);
             }
@@ -312,7 +316,7 @@ sub mailDecode {
         }
         # yes, this is a content line
 	$body .= $_ ;
-        $signed .= $_ if ($sig == 2);
+        $signed .= $_ if ($sig == 2); # print "$sig\n";
     }
     # flush last part
     if ($main_type =~ /multi/) {
@@ -324,7 +328,7 @@ sub mailDecode {
 	parts($p);
     }
     if ($main_type =~ /pkcs7-mime/) {
-        open(IN,"gpgsm -d ".$tmpname.".p7m| sed 's/.\$//'|");
+        open(IN,"gpgsm -d ".$tmpname.".p7m| sed 's/\\r\$//'|");
         &mailDecode;
         return;
     }
@@ -403,14 +407,24 @@ sub save_pksc7 { # for gpgsm
     print OUT "-----END SIGNED MESSAGE-----\n";
     close OUT;
     open OUT,">$tmpname.body";
-    for (split(/\n/,$signed)) {
-        print OUT $_,"\r\n";
+    # single base64 case has no crlf in the last line
+    if ($signed =~ /^Content-Transfer-Encoding: base64/) {
+       chop $signed;
+       $signed =~ s/\n/\r\n/mg;
+       print OUT $signed;
+    } else {
+       for (split(/\n/,$signed)) {
+            print OUT $_,"\r\n";
+       }
     }
-    print OUT "\r\n";
+    # print OUT "\r\n";
     close OUT;
     if ($verify) {
-        system("gpgsm --verify $tmpname.p7s $tmpname.body");
+        $fullbuffer .= $mhfilename . "\n"; 
+        $fullbuffer .= `gpgsm --verify $tmpname.p7s $tmpname.body 2>&1`;
     }
+    #  openssl smime -verify -in `mhpath cur`  -noverify -out mail_body.txt
+    #  diff mail_body.txt /tmp/show1111.body
 }
 
 sub save_pksc7_mime { # for gpgsm

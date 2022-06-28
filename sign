@@ -115,7 +115,7 @@ sub encode {
     open M,"<", $ENV{'mhdraft'} or die "can't open $!\n";
     my $ign = 1;
     while(<M>) {
-        $ign = 0 if (/^--GPGSM-Mail=_41070376-76F6-4E6D-BE3A-1DD07BDA7DA8/);
+        $ign = 0 if (m=^Content-Type: multipart/signed;=);
         print if (! $ign);
     }
     close O;
