@@ -17,19 +17,33 @@ use strict;
 use NKF;
 use MIME::Base64;
 use MIME::QuotedPrint;
+use File::Temp qw/ tempfile tempdir /;
+
 
 my ($max) = 200000;                       # メールの最大長
 my $unlink = 0;                           # 中間ファイルを消すかどうか
 my $show_header = 1;                      # header を表示するかどうか
 # my $mhl = "mhl";        #   mhl program
-# my @mhl_option = ("-form","mhl.news");    # default form
-my $mhl = "mhl";        #   mhl program
+# my @mhl_option = ("-form","mhl.format");    # default form
 my @mhl_option = ();    # default form
+my $mhl = "less";        #   mhl program
+# my @mhl_option = ();    # default form
 my $nkfopt = "--unix -Zw";                # nkf のoption, unix new line, convert zenkaku alphabet, utf-8
 #  temp file を使っても良いのだが、固定名で /tmp に作る方が結果的には便利。
 #  debug にも。
-# use File::Temp qw/ tempfile tempdir /;
-my $tmpname = "/tmp/show1111";      
+#
+
+my $tmpname;
+my $tmpdir; 
+
+if (1) {
+   $tmpdir = File::Temp->newdir();
+## $tmpname = $tmpdir . "/mhl";      
+} else {
+   $tmpdir = "/tmp/";
+}
+
+$tmpname = "show1111";      
 
 my (@A) = ();                             # mh からの引数
 my (@U) = ();                             # mh からのファイル名
@@ -61,12 +75,12 @@ while ( @ARGV ) {
 }
 
 if ($#U == -1 && $signature) {
-    open O,">","$tmpname.repl" or die($!);
+    open O,">","$tmpdir$tmpname.repl" or die($!);
     while(<>) {
         print O $_;
     }
     close O;
-    push @U,"$tmpname.repl";
+    push @U,"$tmpdir$tmpname.repl";
 }
 # process each file 
 
@@ -93,12 +107,14 @@ sub mynkf
 sub last
 {
 #    my ($fh, $filename) = tempfile();
-    my ($fh, $filename) = ("out",$tmpname.".txt");
+    my ($fh, $filename) = ("out",$tmpdir.$tmpname.".txt");
     open OUT,">$filename";
+    print OUT ">>> $mhfilename\n";
     print OUT nkf($nkfopt,$fullbuffer);
     close OUT;
 #    if (!fork) {
     system ($mhl, @mhl_option, $filename);
+#     print "$mhl @mhl_option $filename\n";
 #    }
 #    wait;   # some how it does not wait
     my $result = $?;                     # check for user interrupt 
@@ -137,7 +153,7 @@ sub parts {
 	show_pdf($buf);
 	return;
     } elsif ($type=~/openxmlformats-officedocument/) {
-	show_docx($buf);
+	show_docx($buf,$mimefilename);
 	return;
     } elsif ($type=~/ms-word/) {
 	show_doc($buf);
@@ -157,9 +173,9 @@ sub parts {
 	# octect stream means we have to check filename suffix
 	if ($mimefilename) {
 	    if ($mimefilename=~/\.docx/) {
-		show_docx($buf);
+		show_docx($buf,$mimefilename);
 	    } elsif ($mimefilename=~/\.xlsx/) {
-		show_docx($buf);
+		show_docx($buf,$mimefilename);
 	    } elsif ($mimefilename=~/\.doc/) {
 		show_doc($buf);
 	    } elsif ($mimefilename=~/\.pdf/) {
@@ -176,7 +192,8 @@ sub parts {
         save_pksc7($buf,$p->{signed});
     } elsif ($type=~/application\/.*pkcs7-mime/) {
         save_pksc7_mime($buf);
-    } elsif ($type=~/application/) {
+    } elsif ($type=~/application\/zip/) {
+        save_zip($buf);
     } elsif ($type=~/multipart/) {
 	# it only contains "This is a multi..."
 	# do nothing
@@ -235,6 +252,7 @@ sub mailDecode {
     $body = $type =  $encoding =  $charset= $mimefilename = "";
     push(@boundary , "xxxyyyyzzzyyzzz");    # push non-matchable boundary to avoid accidental match
     $mime_header = 1;  # must starting from a header
+    $i = 0;
     while(<IN>) {
 	if ($mime_header) {
             #  $sig = 0; $sig_bound = '';  # how's mutiple sig case?
@@ -300,16 +318,16 @@ sub mailDecode {
             # check for parts seperator 
 	    for my $b ( @boundary ) {     # nested separators
 		if (/$b/) {
-		    if (/--$/) { # ignore terminator
-			last if ($b !~ /\\-\\-$/) ;       # normal case
-			s/\-\-$b//; last if (/--$/);      # boundary contains --$
-		    }
                     # flush previous parts
 		    push_parts($buf, $type, $encoding, $charset, $mimefilename, $body,$signed);
                     # start new part from parts header
 		    $body = $type =  $encoding =  $charset= $mimefilename = "";
 		    $mime_header = 1;
 		    $i = 0;
+		    if (/--$/) { # ignore terminator
+			last if ($b !~ /\\-\\-$/) ;       # normal case
+			s/\-\-$b//; last if (/--$/);      # boundary contains --$
+		    }
 		}
 	    }
 	    next;
@@ -328,7 +346,7 @@ sub mailDecode {
 	parts($p);
     }
     if ($main_type =~ /pkcs7-mime/) {
-        open(IN,"gpgsm -d ".$tmpname.".p7m| sed 's/\\r\$//'|");
+        open(IN,"gpgsm -d ".$tmpdir.$tmpname.".p7m| sed 's/\\r\$//'|");
         &mailDecode;
         return;
     }
@@ -386,27 +404,38 @@ sub show_html {
 # pdf decoder
 sub show_pdf {
     my ($buf) = @_;
-    my ($fh, $filename) = ("out",$tmpname.".pdf");
+    my ($fh, $filename) = ("out",$tmpdir . $tmpname.".pdf");
     open OUT,">$filename";
     print OUT $buf;
     close OUT;
-    open PDF,"pdftotext $tmpname.pdf - |";
+    open PDF,"pdftotext $filename - |";
     while(<PDF>) {
         s/\014//g;
 	$fullbuffer .= $_;
     }
     $fullbuffer .= "\n";
+    $tmpname++;
+}
+
+sub save_zip {
+    my ($buf) = @_;
+    my ($fh, $filename) = ("out",$tmpdir.$tmpname.".zip");
+    open OUT,">$filename";
+    print OUT $buf;
+    close OUT;
+    system("open $tmpdir$tmpname.zip");
+    $tmpname++;
 }
 
 sub save_pksc7 { # for gpgsm
     my ($buf,$signed) = @_;
-    my ($fh, $filename) = ("out",$tmpname.".p7s");
+    my ($fh, $filename) = ("out",$tmpdir.$tmpname.".p7s");
     open OUT,">$filename";
     print OUT "-----BEGIN SIGNED MESSAGE-----\n";
     print OUT $buf;
     print OUT "-----END SIGNED MESSAGE-----\n";
     close OUT;
-    open OUT,">$tmpname.body";
+    open OUT,">$tmpdir$tmpname.body";
     # single base64 case has no crlf in the last line
     if ($signed =~ /^Content-Transfer-Encoding: base64/) {
        chop $signed;
@@ -421,7 +450,7 @@ sub save_pksc7 { # for gpgsm
     close OUT;
     if ($verify) {
         $fullbuffer .= $mhfilename . "\n"; 
-        $fullbuffer .= `gpgsm --verify $tmpname.p7s $tmpname.body 2>&1`;
+        $fullbuffer .= `gpgsm --verify $tmpdir$tmpname.p7s $tmpdir$tmpname.body 2>&1`;
     }
     #  openssl smime -verify -in `mhpath cur`  -noverify -out mail_body.txt
     #  diff mail_body.txt /tmp/show1111.body
@@ -429,7 +458,7 @@ sub save_pksc7 { # for gpgsm
 
 sub save_pksc7_mime { # for gpgsm
     my ($buf) = @_;
-    my ($fh, $filename) = ("out",$tmpname.".p7m");
+    my ($fh, $filename) = ("out",$tmpdir.$tmpname.".p7m");
     open OUT,">$filename";
     print OUT "-----BEGIN ENCRYPTED MESSAGE-----\n";
     print OUT $buf;
@@ -439,29 +468,35 @@ sub save_pksc7_mime { # for gpgsm
 
 # MS Word new format (xlsx also comes here, but we will ignore it)
 sub show_docx {
-    my ($buf) = @_;
-    my ($fh, $filename) = ("out",$tmpname.".zip");
+    my ($buf,$mfile) = @_;
+    my $ext = ".zip";
+    if ($mfile =~ m/\.([^.]*)$/) {
+        $ext = $1;
+    }
+    my ($fh, $filename) = ("out",$tmpdir.$tmpname.".$ext");
     open OUT,">$filename";
     print OUT $buf;
     close OUT;
-    open DOC,"unzip -p $filename word/document.xml|";
-    my $xml;
-    while(<DOC>) {
-        s/\014//g;
-        s/<w:r>/<br>/g;
-	$xml .= $_;
-    }
-    $xml .= "\n";
-    show_html($xml,0);
+    $tmpname++;
+    # open DOC,"unzip -p $filename word/document.xml|";
+    # my $xml;
+    # while(<DOC>) {
+    #     s/\014//g;
+    #     s/<w:r>/<br>/g;
+    # 	$xml .= $_;
+    # }
+    # $xml .= "\n";
+    # show_html($xml,0);
 }
 
 # MS Word old format
 sub show_doc {
     my ($buf) = @_;
-    my ($fh, $filename) = ("out",$tmpname.".doc");
+    my ($fh, $filename) = ("out",$tmpdir.$tmpname.".doc");
     open OUT,">$filename" ;
     print OUT $buf;
     close OUT;
+    $tmpname++;
     open DOC,"antiword $filename |";
     my $flag = "";
     while(<DOC>) {
@@ -480,7 +515,7 @@ sub show_doc {
 # RTF format
 sub show_rtf {
     my ($buf) = @_;
-    my ($fh, $filename) = ("out",$tmpname.".rtf");
+    my ($fh, $filename) = ("out",$tmpdir.$tmpname.".rtf");
     $buf =~ s/\\\'([a-f0-9][a-f0-9])/pack("H*",$1)/eg;
     $buf =~ s/\\$//;
     $fullbuffer .= $buf;
@@ -506,7 +541,7 @@ sub show_header  {
 # multi parted smtp mail
 sub show_mail {
     my ($buf) = @_;
-    my ($fh, $filename) = ("out",$tmpname.".eml");
+    my ($fh, $filename) = ("out",$tmpdir.$tmpname.".eml");
     open OUT,">$filename";
     print OUT $buf;
     close OUT;
@@ -514,6 +549,7 @@ sub show_mail {
     while(<DOC>) {
 	$fullbuffer .= $_;
     }
+    $tmpname++;
 }
 
 # end

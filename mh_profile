@@ -1,2 +1,2 @@
-ushow: -showproc mhlnkf -form mhl.news
+ushow: -showproc mhlnkf -form mhl.format
 mhlproc: mhlnkf
