@@ -33,6 +33,7 @@ my $nkfopt = "--unix -Zw";                # nkf のoption, unix new line, conver
 #  debug にも。
 #
 
+my $debug = 0;
 my $tmpname;
 my $tmpdir; 
 
@@ -90,7 +91,7 @@ for (@U) {
     $itemcount = 0;
     s/[<>`'"]//g;
     open(IN,"<$_");
-    &mailDecode;
+    &mailDecode(0);
     &last;               # flush internal buffer
     print $signature if ($signature) ;
 }
@@ -128,6 +129,7 @@ sub parts {
     my ($p) = @_;
     my ($type, $encoding, $charset, $buf, $mimefilename) = 
 	($p->{type},$p->{encoding},$p->{charset},$p->{body},$p->{filename});
+    print STDERR "$p->{type}\n" if ($debug);
 
     # decode base64 or quoted-printable
     my $q = 0;
@@ -136,7 +138,7 @@ sub parts {
 	 $buf = decode_base64($buf);
     } elsif ($encoding =~ /quoted-printable/) {
 	 $buf = decode_qp($buf);
-	$q = 1;   # q encode have to preserve new line in show_html
+  	 $q = 1;   # q encode have to preserve new line in show_html
     }
     # show parts information for user
     my $title =  "Ushow" . $itemcount++ . ": $filename ". $type;
@@ -186,9 +188,12 @@ sub parts {
 		show_html($buf);
 	    } elsif ($mimefilename=~/\.txt/) {
                 mynkf($buf . "\n\n");
+	    } elsif ($mimefilename=~/\.agda/) {
+                mynkf($buf . "\n\n");
 	    }
         }
-    } elsif ($type=~/application\/.*pkcs7-signature/) {
+    } elsif ($type=~/application\/.*pkcs7-signature/ ) {
+        print STDERR "pkcs7-signature $_\n" if ($debug);
         save_pksc7($buf,$p->{signed});
     } elsif ($type=~/application\/.*pkcs7-mime/) {
         save_pksc7_mime($buf);
@@ -249,7 +254,8 @@ sub headerPart {
 
 # parts separator
 sub mailDecode {
-    my ($i, $body, $header, $mime_header);
+    my ($header) = @_;
+    my ($i, $body, $mime_header);
     my $buf = [];
     my ($type, $encoding, $charset, $mimefilename);
     my ($main_type, $main_encoding,$main_charset) = ("text","7bit","");
@@ -272,6 +278,7 @@ sub mailDecode {
                     # print "$type *****\n";
                 }
 		if (/protocol=.*pkcs7-signature/io) {
+                        print STDERR "pkcs7 $_\n" if ($debug);
                         $sig = 1;
                 }
 		if (/\s+boundary\s*=\s*"?([^"\s]+)"?/io) {
@@ -316,6 +323,7 @@ sub mailDecode {
 	}
 	last if ($i++ > $max) ;
 	if (/^---*/) {
+            print STDERR "==== $sig $sig_bound $_\n" if ($debug);
             if (/$sig_bound/) {
                 $sig++ ; # print "$_ ==== $sig_bound\n";
             } else {
@@ -331,6 +339,13 @@ sub mailDecode {
 		    $mime_header = 1;
 		    $i = 0;
 		    if (/--$/) { # ignore terminator
+                        print STDERR "last==== $sig $sig_bound $_\n" if ($debug);
+                        if ($sig == 2) {
+                            $sig++;
+                            $signed .= "\n";
+                        }
+                        pop(@boundary);
+                        next if ($#boundary > 0);                   # still in envelop
 			last mail_loop if ($b !~ /\\-\\-$/) ;       # normal case
 			s/\-\-$b//; last mail_loop if (/--$/);      # boundary contains --$
 		    }
@@ -343,6 +358,7 @@ sub mailDecode {
         $signed .= $_ if ($sig == 2); # print "$sig\n";
     }
     # flush last part
+    print STDERR "last type $main_type - $type \n" if ($debug);
     if ($main_type =~ /multi/) {
         $main_type = $type;
     }
@@ -352,8 +368,9 @@ sub mailDecode {
 	parts($p);
     }
     if ($main_type =~ /pkcs7-mime/) {
+        print STDERR "gpgsm -d ".$tmpdir.$tmpname.".p7m| sed 's/\\r\$//'\n" if ($debug);
         open(IN,"gpgsm -d ".$tmpdir.$tmpname.".p7m| sed 's/\\r\$//'|");
-        &mailDecode;
+        &mailDecode(1);
         return;
     }
 }
@@ -458,8 +475,10 @@ sub save_pksc7 { # for gpgsm
     # print OUT "\r\n";
     close OUT;
     if ($verify) {
+        print STDERR "VERIFY\n";
         $fullbuffer .= $mhfilename . "\n"; 
         $fullbuffer .= `gpgsm --verify $tmpdir$tmpname.p7s $tmpdir$tmpname.body 2>&1`;
+        print STDERR "gpgsm --verify $tmpdir$tmpname.p7s $tmpdir$tmpname.body\n" if ($debug);
     }
     #  openssl smime -verify -in `mhpath cur`  -noverify -out mail_body.txt
     #  diff mail_body.txt /tmp/show1111.body
