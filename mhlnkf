@@ -262,7 +262,9 @@ sub mailDecode {
     my $sig = 0; my $sig_bound  = "xxxyyyyzzzyyzzz"; my $signed;
     # assing "" to avoid undefine warnings
     $body = $type =  $encoding =  $charset= $mimefilename = "";
-    push(@boundary , "xxxyyyyzzzyyzzz");    # push non-matchable boundary to avoid accidental match
+    if ($header != 1) {
+        push(@boundary , "xxxyyyyzzzyyzzz");    # push non-matchable boundary to avoid accidental match
+    }
     $mime_header = 1;  # must starting from a header
     $i = 0;
     mail_loop: while(<IN>) {
@@ -323,7 +325,7 @@ sub mailDecode {
 	}
 	last if ($i++ > $max) ;
 	if (/^---*/) {
-            print STDERR "==== $sig $sig_bound $_\n" if ($debug);
+            print STDERR "==== $sig @boundary $_\n" if ($debug);
             if (/$sig_bound/) {
                 $sig++ ; # print "$_ ==== $sig_bound\n";
             } else {
@@ -340,11 +342,11 @@ sub mailDecode {
 		    $i = 0;
 		    if (/--$/) { # ignore terminator
                         print STDERR "last==== $sig $sig_bound $_\n" if ($debug);
-                        if ($sig == 2) {
+                        my $sig1 = pop(@boundary);
+                        if ($sig == 2 && $boundary[$#boundary] eq $sig_bound ) {
                             $sig++;
                             $signed .= "\n";
                         }
-                        pop(@boundary);
                         next if ($#boundary > 0);                   # still in envelop
 			last mail_loop if ($b !~ /\\-\\-$/) ;       # normal case
 			s/\-\-$b//; last mail_loop if (/--$/);      # boundary contains --$
@@ -461,21 +463,22 @@ sub save_pksc7 { # for gpgsm
     open OUT,">$tmpdir$tmpname.body";
     # single base64 case has no crlf in the last line
     if ($signed =~ /^Content-Transfer-Encoding: base64/m) {
-       chop $signed;
-       $signed =~ s/\n/\r\n/mg;
-       print OUT $signed;
+        chop $signed;
+        $signed =~ s/\n/\r\n/mg;
+        print OUT $signed;
     } else {
         # for (split(/\n/,$signed)) {
         #     print OUT $_,"\r\n";
         # }
         $fullbuffer .= $signed; 
         chop $signed;
+        $signed =~ s/\n/\r\n/mg;
         print OUT $signed;
     }
     # print OUT "\r\n";
     close OUT;
     if ($verify) {
-        print STDERR "VERIFY\n";
+        # print STDERR "VERIFY\n";
         $fullbuffer .= $mhfilename . "\n"; 
         $fullbuffer .= `gpgsm --verify $tmpdir$tmpname.p7s $tmpdir$tmpname.body 2>&1`;
         print STDERR "gpgsm --verify $tmpdir$tmpname.p7s $tmpdir$tmpname.body\n" if ($debug);
