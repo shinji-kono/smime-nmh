@@ -44,7 +44,7 @@ sub headerPart {
 }
 
 sub openMail {
-    system("cp $ENV{'mhdraft'} `mhpath new`");
+    system("cp $ENV{'mhdraft'} `mhpath +drafts new`");
     open O,">",$out or die "can't open $!\n";
     open M,"<",$ENV{'mhdraft'} or die "can't open $!\n";
     &headerPart;
