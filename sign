@@ -136,7 +136,7 @@ Content-Type: application/x-pkcs7-mime; smime-type=enveloped-data; name="smime.p
 Content-Transfer-Encoding: base64
 EOFEOF
     print "\n";
-    open S ,"gpgsm --debug-ignore-expiration --recipient '$to' -a -e $out |" or die($!);
+    open S ,"gpgsm --disable-crl-checks --debug-ignore-expiration --recipient '$to' -a -e $out |" or die($!);
     while(<S>) {
        next if (/^-----(BEGIN|END) .* MESSAGE-----$/);
        print ;
